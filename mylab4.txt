@@ -1,4 +1,4 @@
-/* --COPYRIGHT--,BSD
+﻿/* --COPYRIGHT--,BSD
  * Copyright (c) 2012, Texas Instruments Incorporated
  * All rights reserved.
  *
@@ -30,7 +30,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * --/COPYRIGHT--*/
 //! \file   solutions/instaspin_foc/src/proj_lab04.c
-//! \brief  Using InstaSPIN�FOC only as a torque controller
+//! \brief  Using InstaSPINï¿½FOC only as a torque controller
 //!
 //! (C) Copyright 2011, Texas Instruments, Inc.
 
@@ -39,7 +39,7 @@
 
 //! \defgroup PROJ_LAB04_OVERVIEW Project Overview
 //!
-//! Running InstaSPIN�FOC only as a Torque controller
+//! Running InstaSPINï¿½FOC only as a Torque controller
 //!
 
 // **************************************************************************
@@ -93,7 +93,7 @@ CTRL_Obj *controller_obj;
 #ifdef CSM_ENABLE
 #pragma DATA_SECTION(ctrl,"rom_accessed_data");
 #endif
-CTRL_Obj ctrl;				//v1p7 format
+CTRL_Obj ctrl;              //v1p7 format
 #endif
 
 uint16_t gLEDcnt = 0;
@@ -120,6 +120,11 @@ DRV_SPI_8301_Vars_t gDrvSpi8301Vars;
 DRV_SPI_8305_Vars_t gDrvSpi8305Vars;
 #endif
 
+#ifndef F2806xM
+HAL_DacData_t gDacData;
+#endif
+
+
 _iq gFlux_pu_to_Wb_sf;
 
 _iq gFlux_pu_to_VpHz_sf;
@@ -128,16 +133,15 @@ _iq gTorque_Ls_Id_Iq_pu_to_Nm_sf;
 
 _iq gTorque_Flux_Iq_pu_to_Nm_sf;
 
-
-//_iq iq_ref;
-
+// define Angle Generate
+ANGLE_GEN_Handle angle_genHandle;
+ANGLE_GEN_Obj    angle_gen;
 
 // **************************************************************************
 // the functions
 
 void main(void)
 {
-   // Vdc_Ref=gMotorVars.VdcBus_V;
   uint_least8_t estNumber = 0;
 
 #ifdef FAST_ROM_V1p6
@@ -199,10 +203,10 @@ void main(void)
 
   // initialize the controller
 #ifdef FAST_ROM_V1p6
-  ctrlHandle = CTRL_initCtrl(ctrlNumber, estNumber);  		//v1p6 format (06xF and 06xM devices)
+  ctrlHandle = CTRL_initCtrl(ctrlNumber, estNumber);        //v1p6 format (06xF and 06xM devices)
   controller_obj = (CTRL_Obj *)ctrlHandle;
 #else
-  ctrlHandle = CTRL_initCtrl(estNumber,&ctrl,sizeof(ctrl));	//v1p7 format default
+  ctrlHandle = CTRL_initCtrl(estNumber,&ctrl,sizeof(ctrl)); //v1p7 format default
 #endif
 
 
@@ -219,6 +223,32 @@ void main(void)
   // set the default controller parameters
   CTRL_setParams(ctrlHandle,&gUserParams);
 
+#ifndef F2806xM
+  // set DAC parameters
+  gDacData.ptrData[0] = &angle_gen.Angle_pu;
+  gDacData.ptrData[1] = &gAdcData.I.value[0];
+  gDacData.ptrData[2] = &gAdcData.V.value[0];
+  gDacData.ptrData[3] = &controller_obj->Idq_in.value[1];
+  gDacData.ptrData[4] = &controller_obj->Idq_ref.value[1];
+
+  HAL_setDacParameters(halHandle, &gDacData);
+#endif
+
+#ifndef F2806xM
+  // Initialize Datalog
+  datalogHandle = DATALOG_init(&datalog,sizeof(datalog));
+  DATALOG_Obj *datalogObj = (DATALOG_Obj *)datalogHandle;
+
+  // Connect inputs of the datalog module
+  datalog.iptr[0] = &angle_gen.Angle_pu;        // datalogBuff[0]
+  datalog.iptr[1] = &gAdcData.V.value[0];       // datalogBuff[1]
+  datalog.iptr[2] = &gAdcData.I.value[0];       // datalogBuff[2]
+  datalog.iptr[3] = &controller_obj->Idq_in.value[1]; // datalogBuff[3]
+  datalog.iptr[4] = &controller_obj->Idq_ref.value[1]; // datalogBuff[4]
+
+  datalogObj->Flag_EnableLogData = true;
+  datalogObj->Flag_EnableLogOneShot = false;
+#endif
 
   // setup faults
   HAL_setupFaults(halHandle);
@@ -472,7 +502,20 @@ interrupt void mainISR(void)
   // setup the controller
   CTRL_setup(ctrlHandle);
 
+#ifndef F2806xM
+  DATALOG_update(datalogHandle);
+#endif
 
+#ifndef F2806xM
+  // connect inputs of the PWMDAC module.
+  gDacData.value[0] = (*gDacData.ptrData[0]);   // Motor_AdcTreat.iqSampleIu;
+  gDacData.value[1] = (*gDacData.ptrData[1]);   // controller_obj->angle_esmo_pu;
+  gDacData.value[2] = (*gDacData.ptrData[2]);   // controller_obj->angle_est_pu;
+  gDacData.value[3] = (*gDacData.ptrData[3]);   // controller_obj->idq_in;
+  gDacData.value[4] = (*gDacData.ptrData[4]);   // controller_obj->idq_ref;
+
+  HAL_writeDacData(halHandle,&gDacData);
+#endif
   return;
 } // end of mainISR() function
 
@@ -515,11 +558,16 @@ void updateGlobalVariables_motor(CTRL_Handle handle)
   gMotorVars.EstState = EST_getState(obj->estHandle);
 
   // Get the DC buss voltage
-  gMotorVars.VdcBus_V = _IQmpy(gAdcData.dcBus,_IQ(USER_IQ_FULL_SCALE_VOLTAGE_V));
+  gMotorVars.VdcBus_kV = _IQmpy(gAdcData.dcBus,_IQ(USER_IQ_FULL_SCALE_VOLTAGE_V/1000.0));
 
-  // Get the DC buss current
-  gMotorVars.Ig_Ref = _IQmpy(gAdcData.I_gen,_IQ(USER_IQ_FULL_SCALE_CURRENT_A));
+  // Get the DC bus current
+   gMotorVars.Igen = (gAdcData.I_gen/USER_IQ_FULL_SCALE_CURRENT_A);
 
+
+
+  //gMotorVars.I_d=controller_obj->Idq_in.value[0];
+  //gMotorVars.I_q=controller_obj->Idq_in.value[1];
+  //gMotorVars.V_a=gAdcData.V.value[0];
 
   return;
 } // end of updateGlobalVariables_motor() function
@@ -527,15 +575,7 @@ void updateGlobalVariables_motor(CTRL_Handle handle)
 
 void updateIqRef(CTRL_Handle handle)
 {
-  //_iq iq_ref = _IQmpy(gMotorVars.IqRef_A,_IQ(1.0/USER_IQ_FULL_SCALE_CURRENT_A));
-    _iq v_wind  = gMotorVars.wind_speed;
-    _iq Vdc     = gMotorVars.VdcBus_V;
-    _iq Vdc0    = (v_wind*(2.5));    //CTRL_setVdc_ref(handle, v_wind);
-    _iq I_gen_pu   = (gMotorVars.Ig_Ref,_IQ(1.0/USER_IQ_FULL_SCALE_CURRENT_A)); // Here I am not sure if Igen could be defined in motor variables and connected like this work on it
-    //_iq I_gen   = _IQ(0.1); // Here I am not sure if Igen could be defined in motor variables and connected like this work on it
-    // delta_t = (0.5); C       = (0.001);// capacitance value in the input
-    _iq delta_i_pu = _IQmpy(((Vdc0-Vdc)*0.02),_IQ(1.0/USER_IQ_FULL_SCALE_CURRENT_A));
-    _iq iq_ref= I_gen_pu - delta_i_pu; // in pu
+ /* _iq iq_ref = _IQmpy(gMotorVars.IqRef_A,_IQ(1.0/USER_IQ_FULL_SCALE_CURRENT_A));
 
   // set the speed reference so that the forced angle rotates in the correct direction for startup
   if(_IQabs(gMotorVars.Speed_krpm) < _IQ(0.01))
@@ -550,20 +590,43 @@ void updateIqRef(CTRL_Handle handle)
         }
     }
 
-  // Set the Vdc reference
-  //CTRL_setVdc_ref_pu(handle, Vdc_Ref);
   // Set the Iq reference that use to come out of the PI speed control
   CTRL_setIq_ref_pu(handle, iq_ref);
-  gMotorVars.IqRef_A=iq_ref;
-  gMotorVars.Igen=I_gen_pu;
-  gMotorVars.delta_i_pu=delta_i_pu;
-  gMotorVars.Vdc_Ref=Vdc0;
+*/
+    //_iq iq_ref = _IQmpy(gMotorVars.IqRef_A,_IQ(1.0/USER_IQ_FULL_SCALE_CURRENT_A));
+       _iq v_wind  = gMotorVars.wind_speed;
+       _iq Vdc     = gMotorVars.VdcBus_kV*1000;
+       _iq Vdc0    = (v_wind*(2.5));    //CTRL_setVdc_ref(handle, v_wind);
+       _iq I_gen_pu   = gMotorVars.Igen; // Here I am not sure if Igen could be defined in motor variables and connected like this work on it
+       //_iq I_gen   = _IQ(0.1); // Here I am not sure if Igen could be defined in motor variables and connected like this work on it
+       // delta_t = (5); C       = (0.001);// capacitance value in the input
+       _iq delta_i_pu = _IQmpy(((Vdc0-Vdc)*0.002),_IQ(1.0/USER_IQ_FULL_SCALE_CURRENT_A));
+       _iq iq_ref= I_gen_pu - delta_i_pu; // in pu
+
+     // set the speed reference so that the forced angle rotates in the correct direction for startup
+     if(_IQabs(gMotorVars.Speed_krpm) < _IQ(0.01))
+       {
+         if(iq_ref < _IQ(0.0))
+           {
+             CTRL_setSpd_ref_krpm(handle,_IQ(-0.01));
+           }
+         else if(iq_ref > _IQ(0.0))
+           {
+             CTRL_setSpd_ref_krpm(handle,_IQ(0.01));
+           }
+       }
+
+     // Set the Vdc reference
+     //CTRL_setVdc_ref_pu(handle, Vdc_Ref);
+     // Set the Iq reference that use to come out of the PI speed control
+     CTRL_setIq_ref_pu(handle, iq_ref);
+     gMotorVars.IqRef_A=iq_ref;
+    // gMotorVars.Igen=I_gen_pu;
+     gMotorVars.delta_i_pu=delta_i_pu;
+     gMotorVars.Vdc_Ref=Vdc0;
 
   return;
 } // end of updateIqRef() function
-
-
-
 
 
 //@} //defgroup
